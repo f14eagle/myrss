@@ -3,12 +3,19 @@ const moment = require('moment')
 const numeral = require('numeral')
 const fs = require('fs')
 const prompt = require('prompt')
+
+const _ = require('lodash')
 const Promise = require('bluebird')
 const RssParser = require('rss-parser')
+const Datastore = require('nedb')
 
 var startDate = null
 var feeds = []
 var parser = new RssParser()
+var db = new Datastore({
+  filename: './db/anim'
+})
+db = Promise.promisifyAll(db)
 
 var lastPubDate = moment(require('./lastPubDate.json').date, "YYYY-MM-DD")
 if(lastPubDate){
@@ -28,8 +35,21 @@ prompt.get(['days'], (err, result) => {
   startDate = moment().add(-days, 'days')
   console.log('检查该日期后所有的更新: ' + startDate.format('YYYY-MM-DD'))
 
-  execute()
+  startDb()
+  .then(execute)
 })
+
+function startDb(){
+  return db.loadDatabaseAsync()
+    .then(err => {
+      if(err){
+        console.log('读取数据库发生错误: ', err)
+        throw err
+      }else{
+        console.log('数据库连接成功！')
+      }
+    })
+}
 
 function execute(){
   var rss = config.get('rss')
@@ -49,24 +69,37 @@ function execute(){
   }
 }
 
+
+
 function printDownloadLink(rssFeed){
   return parser.parseURL(rssFeed.rss)
   .then(feed => {
-    feed.items.forEach(o => {
+    return Promise.mapSeries(feed.items, o => {
       if(moment(o.pubDate) <= startDate){
         return
       }
       checkPubDate(o.pubDate)
+      o.pubDateFull = moment(o.pubDate).toDate()
       console.log('[' + moment(o.pubDate).format('YYYY-MM-DD') + '] - ' + o.title)
       //console.log(o.enclosure.url)
-
-      o.pubDateFull = moment(o.pubDate)
       addFeed(o)
+      return saveFeed(o)
     })
   })
   .catch(err => {
     console.error(err)
   })
+}
+
+function saveFeed(o){
+  let doc = _.pick(o, ['title', 'link', 'pubDate', 'description', 'enclosure', 'author', 'guid', 'category', 'pubDateFull'])
+  doc._id = o.guid
+
+  return db.updateAsync(
+    { _id: o.guid },
+    doc,
+    { upsert: true }
+  )
 }
 
 function addFeed(o){
@@ -94,7 +127,7 @@ function writeResultToFile(){
   let filename = './output/' + moment().format('YYYY-MM-DD') + '.txt'
   let filecon = ''
   feeds.forEach(feed => {
-    filecon += '[' + feed.pubDateFull.format('YYYY-MM-DD') + '] - ' + feed.title + '\r\n'
+    filecon += '[' + moment(feed.pubDateFull).format('YYYY-MM-DD') + '] - ' + feed.title + '\r\n'
     filecon += feed.enclosure.url + '\r\n'
   })
   fs.writeFileSync(filename, filecon, {flag: 'w+'})
