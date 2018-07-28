@@ -3,6 +3,8 @@ const moment = require('moment')
 const numeral = require('numeral')
 const fs = require('fs')
 const prompt = require('prompt')
+
+const Excel = require('exceljs')
 const Promise = require('bluebird')
 const RssParser = require('rss-parser')
 
@@ -28,18 +30,23 @@ prompt.get(['days'], (err, result) => {
   startDate = moment().add(-days, 'days')
   console.log('检查该日期后所有的更新: ' + startDate.format('YYYY-MM-DD'))
 
-  execute()
+  loadFeedSettings()
+  .then(execute)
 })
 
-function execute(){
-  var rss = config.get('rss')
+function execute(rss){
+  //var rss = config.get('rss')
   if(rss && rss.length){
     Promise.mapSeries(rss, rssFeed => {
-      console.log('Print download link: ' + rssFeed.name)
-      return printDownloadLink(rssFeed)
+      //console.log('Print download link: ' + rssFeed.name)
+      if(rssFeed.download){
+        return printDownloadLink(rssFeed)
+      }else{
+        return
+      }
     })
     .then(() => {
-      console.log('Last pubDate: ' + maxDate)
+      console.log('最新的发布日期: ' + maxDate)
 
       if(maxDate){
         //fs.writeFileSync('./lastPubDate.json', JSON.stringify({date: maxDate}), {flag: 'w+'})
@@ -49,7 +56,35 @@ function execute(){
   }
 }
 
+function loadFeedSettings(){
+  console.log('读取 config/rss.xlsx 的内容')
+  var wb = new Excel.Workbook();
+
+  return wb.xlsx.readFile('./config/rss.xlsx')
+    .then(() => {
+      var sheet = wb.getWorksheet(1)
+      console.log('读取到行数: ' + sheet.rowCount)
+
+      var data = []
+      var header = sheet.getRow(1).values
+      for(var i = 2; i <= sheet.rowCount; i++){
+        var row = sheet.getRow(i).values
+        var o = {}
+        for(var j = 1; j < header.length; j++){
+          if(typeof row[j] == 'object'){
+            o[header[j]] = row[j].text
+          }else{
+            o[header[j]] = row[j]
+          }
+        }
+        data.push(o)
+      }
+      return data
+  })
+}
+
 function printDownloadLink(rssFeed){
+  console.log('读取rss: ' + rssFeed.name)
   return parser.parseURL(rssFeed.rss)
   .then(feed => {
     feed.items.forEach(o => {
@@ -80,6 +115,9 @@ function checkPubDate(date){
 }
 
 function writeResultToFile(){
+  let filename = './output/' + moment().format('YYYY-MM-DD') + '.txt'
+  console.log('将结果写入文件: ' + filename)
+
   //sort feed by publish date
   feeds.sort((a, b) => {
     if(a.pubDateFull > b.pubDateFull){
@@ -90,8 +128,6 @@ function writeResultToFile(){
       return 0
     }
   })
-
-  let filename = './output/' + moment().format('YYYY-MM-DD') + '.txt'
   let filecon = ''
   feeds.forEach(feed => {
     filecon += '[' + feed.pubDateFull.format('YYYY-MM-DD') + '] - ' + feed.title + '\r\n'
