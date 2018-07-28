@@ -1,3 +1,5 @@
+global.__basedir = __dirname
+
 const config = require('config')
 const moment = require('moment')
 const numeral = require('numeral')
@@ -5,17 +7,17 @@ const fs = require('fs')
 const prompt = require('prompt')
 
 const _ = require('lodash')
+const Excel = require('exceljs')
 const Promise = require('bluebird')
 const RssParser = require('rss-parser')
-const Datastore = require('nedb')
+
+const db = require('./lib/db')
+const exportFile = require('./lib/exportFile')
+const download = require('./lib/download')
 
 var startDate = null
 var feeds = []
 var parser = new RssParser()
-var db = new Datastore({
-  filename: './db/anim'
-})
-db = Promise.promisifyAll(db)
 
 var lastPubDate = moment(require('./lastPubDate.json').date, "YYYY-MM-DD")
 if(lastPubDate){
@@ -35,43 +37,62 @@ prompt.get(['days'], (err, result) => {
   startDate = moment().add(-days, 'days')
   console.log('检查该日期后所有的更新: ' + startDate.format('YYYY-MM-DD'))
 
-  startDb()
+  db.connect()
+  .then(loadFeedSettings)
   .then(execute)
 })
 
-function startDb(){
-  return db.loadDatabaseAsync()
-    .then(err => {
-      if(err){
-        console.log('读取数据库发生错误: ', err)
-        throw err
-      }else{
-        console.log('数据库连接成功！')
-      }
-    })
-}
-
-function execute(){
-  var rss = config.get('rss')
+function execute(rss){
   if(rss && rss.length){
     Promise.mapSeries(rss, rssFeed => {
-      console.log('Print download link: ' + rssFeed.name)
-      return printDownloadLink(rssFeed)
+      //console.log('Print download link: ' + rssFeed.name)
+      if(rssFeed.download){
+        return printDownloadLink(rssFeed)
+      }else{
+        return
+      }
     })
     .then(() => {
-      console.log('Last pubDate: ' + maxDate)
+      console.log('最新的发布日期: ' + maxDate)
 
       if(maxDate){
         //fs.writeFileSync('./lastPubDate.json', JSON.stringify({date: maxDate}), {flag: 'w+'})
       }
-      writeResultToFile()
     })
+    .then(download)
+    .then(exportFile)
   }
 }
 
+function loadFeedSettings(){
+  console.log('读取 config/rss.xlsx 的内容')
+  var wb = new Excel.Workbook();
 
+  return wb.xlsx.readFile('./config/rss.xlsx')
+    .then(() => {
+      var sheet = wb.getWorksheet(1)
+      console.log('读取到配置数量: ' + sheet.rowCount)
+
+      var data = []
+      var header = sheet.getRow(1).values
+      for(var i = 2; i <= sheet.rowCount; i++){
+        var row = sheet.getRow(i).values
+        var o = {}
+        for(var j = 1; j < header.length; j++){
+          if(typeof row[j] == 'object'){
+            o[header[j]] = row[j].text
+          }else{
+            o[header[j]] = row[j]
+          }
+        }
+        data.push(o)
+      }
+      return data
+  })
+}
 
 function printDownloadLink(rssFeed){
+  console.log('读取rss: ' + rssFeed.name)
   return parser.parseURL(rssFeed.rss)
   .then(feed => {
     return Promise.mapSeries(feed.items, o => {
@@ -80,10 +101,10 @@ function printDownloadLink(rssFeed){
       }
       checkPubDate(o.pubDate)
       o.pubDateFull = moment(o.pubDate).toDate()
-      console.log('[' + moment(o.pubDate).format('YYYY-MM-DD') + '] - ' + o.title)
+      //console.log('[' + moment(o.pubDate).format('YYYY-MM-DD') + '] - ' + o.title)
       //console.log(o.enclosure.url)
       addFeed(o)
-      return saveFeed(o)
+      return saveFeed(o, rssFeed)
     })
   })
   .catch(err => {
@@ -91,15 +112,23 @@ function printDownloadLink(rssFeed){
   })
 }
 
-function saveFeed(o){
+function saveFeed(o, rssFeed){
   let doc = _.pick(o, ['title', 'link', 'pubDate', 'description', 'enclosure', 'author', 'guid', 'category', 'pubDateFull'])
   doc._id = o.guid
+  doc.anim = rssFeed.name
 
-  return db.updateAsync(
-    { _id: o.guid },
-    doc,
-    { upsert: true }
-  )
+  return db.findOneAsync({ _id: o.guid })
+    .then(r => {
+      if(!r){
+        console.log('[' + moment(o.pubDate).format('YYYY-MM-DD') + '] - ' + o.title)
+        doc.status = 'NEW'
+        return db.updateAsync(
+          { _id: o.guid },
+          doc,
+          { upsert: true }
+        )
+      }
+    })
 }
 
 function addFeed(o){
@@ -113,6 +142,9 @@ function checkPubDate(date){
 }
 
 function writeResultToFile(){
+  let filename = './output/' + moment().format('YYYY-MM-DD') + '.txt'
+  console.log('将结果写入文件: ' + filename)
+
   //sort feed by publish date
   feeds.sort((a, b) => {
     if(a.pubDateFull > b.pubDateFull){
@@ -123,8 +155,6 @@ function writeResultToFile(){
       return 0
     }
   })
-
-  let filename = './output/' + moment().format('YYYY-MM-DD') + '.txt'
   let filecon = ''
   feeds.forEach(feed => {
     filecon += '[' + moment(feed.pubDateFull).format('YYYY-MM-DD') + '] - ' + feed.title + '\r\n'
